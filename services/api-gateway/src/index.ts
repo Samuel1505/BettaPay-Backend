@@ -110,13 +110,13 @@ fastify.get('/api/deployments', async (request, reply) => {
     contracts: [
       {
         name: 'Settlement contract',
-        contractId: process.env.SETTLEMENT_CONTRACT_ID ?? 'CC74K4KWT4ZSTDBGEYM2LT2N4H6R2HV7VA5HEWUQVPMHVDPL44EQSCNM',
-        explorerUrl: 'https://lab.stellar.org/r/testnet/contract/CC74K4KWT4ZSTDBGEYM2LT2N4H6R2HV7VA5HEWUQVPMHVDPL44EQSCNM',
+        contractId: process.env.SETTLEMENT_CONTRACT_ID ?? 'CBGBGKJSUY7XYB6HWW4CVAU6MW2KD25FSF45E5KCP53TKUK374MBZNFB',
+        explorerUrl: 'https://lab.stellar.org/r/testnet/contract/CBGBGKJSUY7XYB6HWW4CVAU6MW2KD25FSF45E5KCP53TKUK374MBZNFB',
       },
       {
         name: 'Governance contract',
-        contractId: process.env.GOVERNANCE_CONTRACT_ID ?? 'CATDQJ4O24SOWJHJFHA4GZCVBFSAAELJ62FXI7XSAMNQ753BOWHIM3LJ',
-        explorerUrl: 'https://lab.stellar.org/r/testnet/contract/CATDQJ4O24SOWJHJFHA4GZCVBFSAAELJ62FXI7XSAMNQ753BOWHIM3LJ',
+        contractId: process.env.GOVERNANCE_CONTRACT_ID ?? 'CDPFWUTIXF5BC6BKNDLSQOZSDQCXAJNZFCZWHBE2RRHANRN25T3ILPZ7',
+        explorerUrl: 'https://lab.stellar.org/r/testnet/contract/CDPFWUTIXF5BC6BKNDLSQOZSDQCXAJNZFCZWHBE2RRHANRN25T3ILPZ7',
       },
     ],
     updatedAt: new Date().toISOString(),
