@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@bettapay/validation": "workspace:*",
+    "@fastify/rate-limit": "~11.0.0",
     "@prisma/client": "^7.8.0",
     "zod": "^3.22.4"
   },
