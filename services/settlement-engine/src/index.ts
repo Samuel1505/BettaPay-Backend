@@ -11,15 +11,24 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import crypto from 'crypto';
+import { PrismaClient } from '@prisma/client/runtime/client';
 import {
   validateEnv,
   CreateSettlementBody,
-  Settlement,
 } from "@bettapay/validation";
 import { Queue, Worker } from 'bullmq';
 
 const env = validateEnv(process.env);
 const PORT = Number(process.env.PORT ?? '3001');
+
+const prisma = new PrismaClient();
+
+type SettlementJobData = {
+  id: string;
+  merchantId: string;
+  grossAmount: string;
+  asset: string;
+};
 
 const fastify = Fastify({ 
   logger: true,
@@ -29,7 +38,7 @@ const fastify = Fastify({
 });
 
 fastify.register(cors, { 
-  origin: env.ALLOWED_ORIGINS.split(',').map(o => o.trim()) 
+  origin: env.ALLOWED_ORIGINS.split(',').map((o: string) => o.trim()) 
 });
 
 const redisConnection = new URL(env.REDIS_URL);
@@ -38,15 +47,58 @@ const connectionParams = {
   port: parseInt(redisConnection.port || '6379', 10),
 };
 
-const settlementQueue = new Queue('settlements', { connection: connectionParams });
+const settlementQueue = new Queue<SettlementJobData>('settlements', { connection: connectionParams });
 
-const worker = new Worker('settlements', async job => {
-  console.log(`[Settlement Worker] Processing job ${job.id}`);
-  // In a real app, this interacts with Soroban
-}, { connection: connectionParams });
+const worker = new Worker<SettlementJobData>(
+  'settlements',
+  async job => {
+    const { id, merchantId, grossAmount, asset } = job.data;
+    fastify.log.info(`[Settlement Worker] Processing settlement ${id} for merchant ${merchantId}`);
 
-// In-memory store for development (Gateway uses DB, this worker processes memory queue)
-const settlements: Settlement[] = [];
+    await prisma.settlement.update({
+      where: { id },
+      data: { status: 'processing' },
+    });
+
+    try {
+      await simulateSorobanSettlement(merchantId, grossAmount, asset);
+      const completedAt = new Date();
+
+      await prisma.settlement.update({
+        where: { id },
+        data: {
+          status: 'completed',
+          completedAt,
+        },
+      });
+
+      fastify.log.info(`[Settlement Worker] Completed settlement ${id}`);
+    } catch (error) {
+      fastify.log.error(
+        `[Settlement Worker] Failed settlement ${id}: ${error instanceof Error ? error.message : String(error)}`
+      );
+      await prisma.settlement.update({
+        where: { id },
+        data: { status: 'failed' },
+      }).catch(() => null);
+      throw error;
+    }
+  },
+  { connection: connectionParams, concurrency: 1 }
+);
+
+async function simulateSorobanSettlement(
+  merchantId: string,
+  grossAmount: string,
+  asset: string
+) {
+  const delayMs = Number(process.env.SETTLEMENT_SIMULATION_DELAY_MS ?? 1000);
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+  fastify.log.debug(
+    `Simulated Soroban settlement for merchant=${merchantId}, amount=${grossAmount}, asset=${asset}`
+  );
+}
 
 // Mock function to simulate fetching per-merchant fee rules from governance contract / API gateway
 async function fetchMerchantFeeBps(merchantId: string): Promise<number> {
@@ -55,7 +107,10 @@ async function fetchMerchantFeeBps(merchantId: string): Promise<number> {
 }
 
 fastify.get('/api/settlements', async (request, reply) => {
-  return { settlements, total: settlements.length };
+  const records = await prisma.settlement.findMany({
+    orderBy: { initiatedAt: 'desc' },
+  });
+  return { settlements: records, total: records.length };
 });
 
 fastify.post('/api/settlements', async (request, reply) => {
@@ -64,34 +119,29 @@ fastify.post('/api/settlements', async (request, reply) => {
     const gross = parseFloat(d.amount ?? '0');
     if (gross <= 0) return reply.code(400).send({ error: 'amount must be > 0' });
 
-    // Fetch dynamic fee rules
-    const feeBps = await fetchMerchantFeeBps(d.merchantId);
-    
-    const fee = (gross * feeBps) / 10_000;
-    const net = gross - fee;
-    const initiatedAt = new Date().toISOString();
-
-    const record: Settlement = {
-      id: "set_" + crypto.randomUUID().replace(/-/g, ""),
-      merchantId: d.merchantId,
-      totalAmount: d.amount,
-      asset: d.asset,
-      initiatedAt,
-      completedAt: initiatedAt,
-      status: "completed",
-      metadata: {
-        grossAmount: gross.toFixed(2),
-        feeAmount: fee.toFixed(2),
-        netAmount: net.toFixed(2),
-        feeBps,
-        contractRef: env.SETTLEMENT_CONTRACT_ID,
+    const settlement = await prisma.settlement.create({
+      data: {
+        id: 'set_' + crypto.randomUUID().replace(/-/g, ''),
+        merchantId: d.merchantId,
+        totalAmount: d.amount,
+        asset: d.asset,
+        status: 'pending',
       },
+    });
+
+    const jobData: SettlementJobData = {
+      id: settlement.id,
+      merchantId: settlement.merchantId,
+      grossAmount: d.amount,
+      asset: d.asset,
     };
 
-    settlements.unshift(record);
-    await settlementQueue.add('process-settlement', record);
+    await settlementQueue.add('process-settlement', jobData, {
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 1000 },
+    });
 
-    return reply.code(201).send(record);
+    return reply.code(201).send(settlement);
   } catch (error) {
     return reply.code(400).send({ error: 'Invalid request payload' });
   }
