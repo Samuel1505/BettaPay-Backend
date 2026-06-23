@@ -4,6 +4,7 @@
  * Handles settlement processing with fee deduction and audit trail.
  *
  * Endpoints:
+ *   GET  /api/health              — liveness and Redis connectivity probe
  *   GET  /api/settlements         — list all settlements
  *   POST /api/settlements         — create and process a settlement
  */
@@ -18,8 +19,15 @@ import {
 } from "@bettapay/validation";
 import { Queue, Worker } from 'bullmq';
 
+interface CreateSettlementRouteBody {
+  merchantId?: unknown;
+  amount?: unknown;
+  asset?: unknown;
+}
+
 const env = validateEnv(process.env);
 const PORT = Number(process.env.PORT ?? '3001');
+const startTime = Date.now();
 
 const fastify = Fastify({ 
   logger: true,
@@ -54,11 +62,30 @@ async function fetchMerchantFeeBps(merchantId: string): Promise<number> {
   return 100; // default 100 bps
 }
 
+fastify.get('/api/health', async (_request, reply) => {
+  let redisConnected = false;
+
+  try {
+    await settlementQueue.getJobCounts();
+    redisConnected = true;
+  } catch (error) {
+    fastify.log.warn({ error }, 'Settlement Redis health check failed');
+  }
+
+  return reply.code(200).send({
+    status: redisConnected ? 'ok' : 'degraded',
+    uptime: Math.floor((Date.now() - startTime) / 1000),
+    redis: {
+      connected: redisConnected,
+    },
+  });
+});
+
 fastify.get('/api/settlements', async (request, reply) => {
   return { settlements, total: settlements.length };
 });
 
-fastify.post('/api/settlements', async (request, reply) => {
+fastify.post<{ Body: CreateSettlementRouteBody }>('/api/settlements', async (request, reply) => {
   try {
     const d = CreateSettlementBody.parse(request.body);
     const gross = parseFloat(d.amount ?? '0');
