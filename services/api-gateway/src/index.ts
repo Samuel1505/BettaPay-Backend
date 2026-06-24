@@ -11,6 +11,7 @@
  *   GET    /api/merchants/:id        — fetch merchant (protected)
  *   DELETE /api/merchants/:id        — soft-delete merchant (protected)
  *   POST   /api/merchants/:id/restore — restore soft-deleted merchant (protected)
+ *   PATCH  /api/merchants/:id/settings — update merchant fee rules / settings (protected)
  *   POST   /api/payments             — initiate payment session (protected)
  *   GET    /api/payments/:id         — fetch payment session
  *   PATCH  /api/payments/:id/status  — transition payment status (protected)
@@ -23,13 +24,17 @@ import cors from '@fastify/cors';
 import fastifyJwt from '@fastify/jwt';
 import rateLimit from '@fastify/rate-limit';
 import crypto from 'crypto';
+import { z } from 'zod';
 import { validateEnv } from '@bettapay/validation';
 import {
   CreateMerchantBody,
   CreatePaymentBody,
   CreateSettlementBody,
   AuthTokenBody,
-  UpdatePaymentStatusBody
+  UpdatePaymentStatusBody,
+  UpdateMerchantSettingsBody,
+  createErrorResponse,
+  ErrorCodes
 } from '@bettapay/validation';
 import { PrismaClient } from '@prisma/client';
 import pg from 'pg';
@@ -73,6 +78,11 @@ interface CreateSettlementRouteBody {
   merchantId?: unknown;
   amount?: unknown;
   asset?: unknown;
+}
+
+interface UpdateMerchantSettingsRouteBody {
+  feeBps?: unknown;
+  tier?: unknown;
 }
 
 interface UpdatePaymentStatusRouteBody {
@@ -187,7 +197,7 @@ fastify.addHook('onRequest', async (request, reply) => {
   // client connection is freed.) The timer is cleared in the onResponse hook below.
   const timeoutTimer = setTimeout(() => {
     if (!reply.sent) {
-      reply.code(408).send({ error: 'Request Timeout' });
+      reply.code(408).send(createErrorResponse(ErrorCodes.REQUEST_TIMEOUT, 'Request Timeout'));
     }
   }, REQUEST_TIMEOUT_MS);
   (request as any).__timeoutTimer = timeoutTimer;
@@ -275,13 +285,22 @@ async function logRequestBody(request: FastifyRequest, reply: FastifyReply) {
   }
 }
 
+// Maps a thrown parse error to the standard 400 envelope. Zod failures carry the
+// issue list in `details`; anything else falls back to a generic invalid request.
+function badRequest(reply: FastifyReply, error: unknown) {
+  if (error instanceof z.ZodError) {
+    return reply.code(400).send(createErrorResponse(ErrorCodes.VALIDATION_ERROR, 'Validation failed', error.errors));
+  }
+  return reply.code(400).send(createErrorResponse(ErrorCodes.INVALID_REQUEST, 'Invalid request payload'));
+}
+
 // Authentication hook
 fastify.decorate('authenticate', async function (request: FastifyRequest, reply: FastifyReply) {
   try {
     await request.jwtVerify();
   } catch (err) {
     request.log.error(err);
-    reply.code(401).send({ error: 'Unauthorized' });
+    reply.code(401).send(createErrorResponse(ErrorCodes.UNAUTHORIZED, 'Unauthorized'));
   }
 });
 
@@ -339,14 +358,14 @@ fastify.post<{ Body: AuthTokenRouteBody }>('/api/auth/token', { config: { rateLi
   try {
     const d = AuthTokenBody.parse(request.body);
     const merchant = await prisma.merchant.findFirst({ where: { id: d.merchantId, deletedAt: null } });
-    if (!merchant) return reply.code(404).send({ error: 'Merchant not found' });
+    if (!merchant) return reply.code(404).send(createErrorResponse(ErrorCodes.NOT_FOUND, 'Merchant not found'));
 
     // In a real system, you would verify the secret/password here.
     // For this example, we'll just issue a token if the merchant exists.
     const token = fastify.jwt.sign({ merchantId: merchant.id, ownerId: merchant.ownerId });
     return reply.send({ token });
   } catch (error) {
-    return reply.code(400).send({ error: 'Invalid request payload' });
+    return badRequest(reply, error);
   }
 });
 
@@ -368,7 +387,7 @@ fastify.post<{ Body: CreateMerchantRouteBody }>('/api/merchants', {
     });
     return reply.code(201).send({ success: true, merchant });
   } catch (error) {
-    return reply.code(400).send({ error: 'Invalid request payload' });
+    return badRequest(reply, error);
   }
 });
 
@@ -379,7 +398,7 @@ fastify.get<{ Params: MerchantParams }>('/api/merchants/:id', {
   const merchant = await prisma.merchant.findFirst({
     where: { id, deletedAt: null },
   });
-  if (!merchant) return reply.code(404).send({ error: 'Merchant not found' });
+  if (!merchant) return reply.code(404).send(createErrorResponse(ErrorCodes.NOT_FOUND, 'Merchant not found'));
   return merchant;
 });
 
@@ -391,7 +410,7 @@ fastify.delete<{ Params: MerchantParams }>('/api/merchants/:id', {
   const merchant = await prisma.merchant.findFirst({
     where: { id, deletedAt: null },
   });
-  if (!merchant) return reply.code(404).send({ error: 'Merchant not found' });
+  if (!merchant) return reply.code(404).send(createErrorResponse(ErrorCodes.NOT_FOUND, 'Merchant not found'));
 
   await prisma.merchant.update({
     where: { id },
@@ -407,9 +426,9 @@ fastify.post<{ Params: MerchantParams }>('/api/merchants/:id/restore', {
 }, async (request, reply) => {
   const { id } = request.params;
   const merchant = await prisma.merchant.findUnique({ where: { id } });
-  if (!merchant) return reply.code(404).send({ error: 'Merchant not found' });
+  if (!merchant) return reply.code(404).send(createErrorResponse(ErrorCodes.NOT_FOUND, 'Merchant not found'));
   if (!merchant.deletedAt) {
-    return reply.code(400).send({ error: 'Merchant is not soft-deleted' });
+    return reply.code(400).send(createErrorResponse(ErrorCodes.INVALID_REQUEST, 'Merchant is not soft-deleted'));
   }
 
   const restored = await prisma.merchant.update({
@@ -420,16 +439,35 @@ fastify.post<{ Params: MerchantParams }>('/api/merchants/:id/restore', {
   return reply.code(200).send({ success: true, merchant: restored });
 });
 
-// Idempotency-Key header validation: optional, 1–255 characters, no control chars.
-const IDEMPOTENCY_KEY_MAX_LEN = 255;
-const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+// Update per-merchant settings (fee rules, tier). Merges into existing settings so
+// a partial update does not wipe unrelated keys. The settlement engine reads
+// settings.feeBps from here when computing fees.
+fastify.patch<{ Params: MerchantParams; Body: UpdateMerchantSettingsRouteBody }>('/api/merchants/:id/settings', {
+  preValidation: [fastify.authenticate],
+  preHandler: [logRequestBody],
+  config: { rateLimit: { max: 30, timeWindow: '1 minute' } }
+}, async (request, reply) => {
+  let d;
+  try {
+    d = UpdateMerchantSettingsBody.parse(request.body);
+  } catch (error) {
+    return badRequest(reply, error);
+  }
 
-function readIdempotencyKey(request: FastifyRequest): string | null {
-  const raw = request.headers['idempotency-key'];
-  if (!raw) return null;
-  const key = Array.isArray(raw) ? raw[0] : raw;
-  return key.trim() || null;
-}
+  const { id } = request.params;
+  const merchant = await prisma.merchant.findFirst({ where: { id, deletedAt: null } });
+  if (!merchant) return reply.code(404).send(createErrorResponse(ErrorCodes.NOT_FOUND, 'Merchant not found'));
+
+  const currentSettings = (merchant.settings ?? {}) as Record<string, unknown>;
+  const nextSettings = { ...currentSettings, ...d };
+
+  const updated = await prisma.merchant.update({
+    where: { id },
+    data: { settings: nextSettings as object },
+  });
+
+  return reply.code(200).send({ success: true, merchant: updated });
+});
 
 // Payments
 fastify.post<{ Body: CreatePaymentRouteBody }>('/api/payments', {
@@ -497,37 +535,15 @@ fastify.post<{ Body: CreatePaymentRouteBody }>('/api/payments', {
     );
 
     return reply.code(201).send(payment);
-
-  } catch (error: any) {
-    // ── 5. Race-safety: two concurrent requests with the same key may both pass
-    //       the findFirst check. The second create will hit the @unique constraint
-    //       (Prisma error code P2002). Re-fetch the winning row and return 200.
-    if (error?.code === 'P2002' && idempotencyKey !== null) {
-      const existing = await prisma.payment.findFirst({
-        where: {
-          idempotencyKey,
-          idempotencyKeyExpiresAt: { gt: new Date() },
-        },
-      });
-
-      if (existing) {
-        request.log.warn(
-          { idempotencyKey, paymentId: existing.id },
-          'Idempotency race resolved — returning existing payment'
-        );
-        return reply.code(200).send(existing);
-      }
-    }
-
-    request.log.error({ error }, 'Payment creation failed');
-    return reply.code(400).send({ error: 'Invalid request payload' });
+  } catch (error) {
+    return badRequest(reply, error);
   }
 });
 
 fastify.get<{ Params: PaymentParams }>('/api/payments/:id', async (request, reply) => {
   const { id } = request.params;
   const payment = await prisma.payment.findUnique({ where: { id } });
-  if (!payment) return reply.code(404).send({ error: 'Payment not found' });
+  if (!payment) return reply.code(404).send(createErrorResponse(ErrorCodes.NOT_FOUND, 'Payment not found'));
   return payment;
 });
 
@@ -542,12 +558,12 @@ fastify.patch<{ Params: PaymentParams; Body: UpdatePaymentStatusRouteBody }>('/a
   try {
     d = UpdatePaymentStatusBody.parse(request.body);
   } catch (error) {
-    return reply.code(400).send({ error: 'Invalid request payload' });
+    return badRequest(reply, error);
   }
 
   const { id } = request.params;
   const payment = await prisma.payment.findUnique({ where: { id } });
-  if (!payment) return reply.code(404).send({ error: 'Payment not found' });
+  if (!payment) return reply.code(404).send(createErrorResponse(ErrorCodes.NOT_FOUND, 'Payment not found'));
 
   const allowed = PAYMENT_STATUS_TRANSITIONS[payment.status] ?? [];
   if (!allowed.includes(d.status)) {
@@ -584,7 +600,7 @@ fastify.post<{ Body: CreateSettlementRouteBody }>('/api/settlements', {
     });
     return reply.code(201).send(settlement);
   } catch (error) {
-    return reply.code(400).send({ error: 'Invalid request payload' });
+    return badRequest(reply, error);
   }
 });
 

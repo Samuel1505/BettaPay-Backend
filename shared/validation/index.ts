@@ -3,11 +3,44 @@ import { z } from 'zod';
 export * from './schemas.js';
 import "dotenv/config";
 
+// ─── Standard error response envelope ─────────────────────────────────────────
+// Every API error response follows { error: { code, message, details? } } so
+// clients can branch on a stable `code` instead of parsing human-readable strings.
+
+export const ErrorCodes = {
+  UNAUTHORIZED: 'UNAUTHORIZED',
+  NOT_FOUND: 'NOT_FOUND',
+  VALIDATION_ERROR: 'VALIDATION_ERROR',
+  INVALID_REQUEST: 'INVALID_REQUEST',
+  REQUEST_TIMEOUT: 'REQUEST_TIMEOUT',
+} as const;
+
+export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
+
+export interface ErrorResponse {
+  error: {
+    code: string;
+    message: string;
+    details?: unknown;
+  };
+}
+
+export function createErrorResponse(code: string, message: string, details?: unknown): ErrorResponse {
+  const error: ErrorResponse['error'] = { code, message };
+  if (details !== undefined) {
+    error.details = details;
+  }
+  return { error };
+}
+
 // Backend environment schema — all critical values are required.
 // Services will refuse to start if any required variable is missing.
 export const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.string().transform((s) => parseInt(s, 10)).default('3000'),
+
+  // Fees — default basis points applied when a merchant has no custom fee rule.
+  FEES_DEFAULT_BPS: z.string().transform((s) => parseInt(s, 10)).default('100'),
 
   // Auth
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters'),
