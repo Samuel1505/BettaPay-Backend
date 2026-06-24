@@ -112,6 +112,9 @@ const fastify = Fastify({
   logger: true,
   requestTimeout: REQUEST_TIMEOUT_MS,
   connectionTimeout: CONNECTION_TIMEOUT_MS,
+  // Limit request body size to 1MB (1,048,576 bytes) to protect the API gateway
+  // from oversized payload attacks and align with typical financial transaction payload sizes.
+  bodyLimit: 1_048_576,
   genReqId: function (req) {
     return (req.headers['x-request-id'] as string) || crypto.randomUUID();
   }
