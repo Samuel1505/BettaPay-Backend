@@ -17,7 +17,7 @@
  *   GET    /api/deployments          — Soroban contract addresses (testnet)
  */
 
-import Fastify, { FastifyRequest, FastifyReply } from 'fastify';
+import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyJwt from '@fastify/jwt';
 import rateLimit from '@fastify/rate-limit';
