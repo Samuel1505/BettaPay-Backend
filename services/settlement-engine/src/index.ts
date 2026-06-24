@@ -7,6 +7,17 @@
  *   GET  /api/health              — liveness and Redis connectivity probe
  *   GET  /api/settlements         — list all settlements
  *   POST /api/settlements         — create and process a settlement
+ *
+ * Precision strategy
+ * ──────────────────
+ * All monetary arithmetic uses BigNumber.js (ROUND_DOWN, no floating-point).
+ * Fee basis points are applied as:
+ *   feeAmount  = floor(grossAmount × feeBps / 10 000, asset decimals)
+ *   netAmount  = grossAmount − feeAmount
+ *
+ * All three amounts (grossAmount, feeAmount, netAmount) are stored as
+ * decimal strings so the database never loses sub-cent precision for
+ * assets like USDC (6 dp) or XLM (7 dp).
  */
 
 import Fastify from 'fastify';
@@ -40,7 +51,7 @@ type SettlementJobData = {
   asset: string;
 };
 
-const fastify = Fastify({ 
+const fastify = Fastify({
   logger: true,
   // Explicitly set body limit to 1MB (Fastify's default)
   bodyLimit: 1_048_576,
@@ -116,7 +127,7 @@ fastify.get('/api/health', async (_request, reply) => {
   });
 });
 
-fastify.get('/api/settlements', async (request, reply) => {
+fastify.get('/api/settlements', async (_request, reply) => {
   const records = await prisma.settlement.findMany({
     orderBy: { initiatedAt: 'desc' },
   });
@@ -126,8 +137,15 @@ fastify.get('/api/settlements', async (request, reply) => {
 fastify.post<{ Body: CreateSettlementRouteBody }>('/api/settlements', async (request, reply) => {
   try {
     const d = CreateSettlementBody.parse(request.body);
-    const gross = parseFloat(d.amount ?? '0');
-    if (gross <= 0) return reply.code(400).send({ error: 'amount must be > 0' });
+
+    // Validate that the amount is positive without floating-point conversion
+    const grossBN = new BigNumber(d.amount ?? '0');
+    if (!grossBN.isFinite() || grossBN.isLessThanOrEqualTo(0)) {
+      return reply.code(400).send({ error: 'amount must be > 0' });
+    }
+
+    const feeBps = await fetchMerchantFeeBps(d.merchantId);
+    const { grossAmount, feeAmount, netAmount } = computeSettlementAmounts(d.amount, feeBps);
 
     const rawIdempotencyKey = request.headers['idempotency-key'];
     const idempotencyKey = Array.isArray(rawIdempotencyKey) ? rawIdempotencyKey[0] : rawIdempotencyKey;
@@ -148,7 +166,11 @@ fastify.post<{ Body: CreateSettlementRouteBody }>('/api/settlements', async (req
       data: {
         id: 'set_' + crypto.randomUUID().replace(/-/g, ''),
         merchantId: d.merchantId,
-        totalAmount: d.amount,
+        totalAmount: grossAmount,
+        grossAmount,
+        feeAmount,
+        netAmount,
+        feeBps,
         asset: d.asset,
         status: 'pending',
       },
@@ -157,8 +179,8 @@ fastify.post<{ Body: CreateSettlementRouteBody }>('/api/settlements', async (req
     const jobData: SettlementJobData = {
       id: settlement.id,
       merchantId: settlement.merchantId,
-      grossAmount: d.amount,
-      asset: d.asset,
+      grossAmount: settlement.grossAmount,
+      asset: settlement.asset,
     };
 
     await settlementQueue.add('process-settlement', jobData, {

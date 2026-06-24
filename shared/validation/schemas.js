@@ -48,11 +48,14 @@ export const settlementSchema = z.object({
     id: idSchema,
     merchantId: idSchema,
     totalAmount: z.string(),
+    grossAmount: z.string(),
+    feeAmount: z.string(),
+    netAmount: z.string(),
+    feeBps: z.number(),
     asset: z.string(),
     initiatedAt: isoDateString,
     completedAt: isoDateString.optional(),
     status: z.enum(['pending', 'processing', 'completed', 'failed']),
-    metadata: z.record(z.any()).optional()
 });
 export const fxQuoteSchema = z.object({
     id: idSchema,
