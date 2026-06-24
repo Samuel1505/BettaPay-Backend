@@ -78,8 +78,25 @@ const isProduction = process.env.NODE_ENV === 'production';
 const env = validateEnv(process.env);
 const PORT = Number(process.env.PORT ?? '3000');
 
+// --- Request lifecycle timeouts ---------------------------------------------
+// REQUEST_TIMEOUT_MS bounds how long a single request may run. If a handler
+// (e.g. a slow DB query or a hung upstream service) exceeds it, the per-request
+// hook below replies 408 Request Timeout so the client connection is released
+// instead of being held open and exhausting the connection pool.
+//
+// CONNECTION_TIMEOUT_MS is the socket-level backstop (set 1s higher). It closes
+// any connection the request timeout did not already finish.
+//
+// IMPORTANT: keep both values BELOW any upstream load balancer / reverse proxy
+// idle timeout (commonly 60s) so this gateway returns a clean 408 rather than
+// the load balancer cutting the connection first.
+const REQUEST_TIMEOUT_MS = 30_000;
+const CONNECTION_TIMEOUT_MS = 31_000;
+
 const fastify = Fastify({
   logger: true,
+  requestTimeout: REQUEST_TIMEOUT_MS,
+  connectionTimeout: CONNECTION_TIMEOUT_MS,
   genReqId: function (req) {
     return (req.headers['x-request-id'] as string) || crypto.randomUUID();
   }
@@ -144,6 +161,23 @@ function redactObject(obj: Record<string, any>) {
 fastify.addHook('onRequest', async (request, reply) => {
   // Mark request start for response time calculation
   (request as any).__startTime = Date.now();
+
+  // Per-request timeout guard. Fastify's requestTimeout only bounds how long the
+  // client takes to *send* a request; it does not abort a slow handler. This timer
+  // covers that case: if the response is not sent within REQUEST_TIMEOUT_MS, reply
+  // 408 so the caller is not left hanging. (The slow handler keeps running, but the
+  // client connection is freed.) The timer is cleared in the onResponse hook below.
+  const timeoutTimer = setTimeout(() => {
+    if (!reply.sent) {
+      reply.code(408).send({ error: 'Request Timeout' });
+    }
+  }, REQUEST_TIMEOUT_MS);
+  (request as any).__timeoutTimer = timeoutTimer;
+});
+
+fastify.addHook('onResponse', async (request) => {
+  const timeoutTimer = (request as any).__timeoutTimer;
+  if (timeoutTimer) clearTimeout(timeoutTimer);
 });
 
 fastify.addHook('onSend', async (request, reply, payload) => {
