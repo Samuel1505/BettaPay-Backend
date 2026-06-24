@@ -8,7 +8,8 @@
     "build": "tsc --project tsconfig.json",
     "start": "node dist/index.js",
     "type-check": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test": "TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/authenticate.test.ts && TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/payment-status.test.ts && TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/request-timeout.test.ts && TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/payment-idempotency.test.ts && TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/request-body-limit.test.ts"
   },
   "dependencies": {
     "@bettapay/validation": "workspace:*",
@@ -22,6 +23,8 @@
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/pg": "^8.20.0",
+    "@types/tape": "^5.6.4",
+    "tape": "^5.9.0",
     "typescript": "^5.3.3"
   }
 }

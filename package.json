@@ -21,7 +21,8 @@
     "fx:dev": "pnpm --filter fx-engine dev",
     "settlement:dev": "pnpm --filter settlement-engine dev",
     "indexer:dev": "pnpm --filter indexer dev",
-    "clean": "pnpm -r clean && rm -rf node_modules"
+    "clean": "pnpm -r clean && rm -rf node_modules",
+    "test": "pnpm --filter api-gateway test"
   },
   "devDependencies": {
     "dotenv": "^17.4.2",

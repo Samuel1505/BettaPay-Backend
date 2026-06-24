@@ -122,6 +122,9 @@ const fastify = Fastify({
   logger: true,
   requestTimeout: REQUEST_TIMEOUT_MS,
   connectionTimeout: CONNECTION_TIMEOUT_MS,
+  // Limit request body size to 1MB (1,048,576 bytes) to protect the API gateway
+  // from oversized payload attacks and align with typical financial transaction payload sizes.
+  bodyLimit: 1_048_576,
   genReqId: function (req) {
     return (req.headers['x-request-id'] as string) || crypto.randomUUID();
   }
@@ -472,8 +475,46 @@ fastify.post<{ Body: CreatePaymentRouteBody }>('/api/payments', {
   preHandler: [logRequestBody],
   config: { rateLimit: { max: 300, timeWindow: '1 minute' } }
 }, async (request, reply) => {
+  // ── 1. Parse and validate request body ──────────────────────────────────────
+  let d: ReturnType<typeof CreatePaymentBody.parse>;
   try {
-    const d = CreatePaymentBody.parse(request.body);
+    d = CreatePaymentBody.parse(request.body);
+  } catch {
+    return reply.code(400).send({ error: 'Invalid request payload' });
+  }
+
+  // ── 2. Read and validate optional Idempotency-Key header ────────────────────
+  const idempotencyKey = readIdempotencyKey(request);
+
+  if (idempotencyKey !== null && idempotencyKey.length > IDEMPOTENCY_KEY_MAX_LEN) {
+    return reply.code(400).send({ error: 'Idempotency-Key must not exceed 255 characters' });
+  }
+
+  // ── 3. Idempotency check: look for a non-expired record with the same key ───
+  if (idempotencyKey !== null) {
+    const now = new Date();
+    const existing = await prisma.payment.findFirst({
+      where: {
+        idempotencyKey,
+        idempotencyKeyExpiresAt: { gt: now },
+      },
+    });
+
+    if (existing) {
+      request.log.info(
+        { idempotencyKey, paymentId: existing.id },
+        'Idempotency hit — returning cached payment'
+      );
+      return reply.code(200).send(existing);
+    }
+  }
+
+  // ── 4. Create the payment (with idempotency fields when a key was supplied) ──
+  const idempotencyKeyExpiresAt = idempotencyKey
+    ? new Date(Date.now() + IDEMPOTENCY_TTL_MS)
+    : null;
+
+  try {
     const payment = await prisma.payment.create({
       data: {
         id: 'pay_' + crypto.randomUUID().replace(/-/g, ''),
@@ -483,8 +524,16 @@ fastify.post<{ Body: CreatePaymentRouteBody }>('/api/payments', {
         asset: d.asset,
         reference: d.reference,
         status: 'initiated',
-      }
+        idempotencyKey: idempotencyKey ?? undefined,
+        idempotencyKeyExpiresAt: idempotencyKeyExpiresAt ?? undefined,
+      },
     });
+
+    request.log.info(
+      { idempotencyKey, paymentId: payment.id },
+      idempotencyKey ? 'Idempotency miss — payment created' : 'Payment created (no idempotency key)'
+    );
+
     return reply.code(201).send(payment);
   } catch (error) {
     return badRequest(reply, error);
