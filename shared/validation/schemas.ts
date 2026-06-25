@@ -232,3 +232,9 @@ export type CreateSettlementBody = z.infer<typeof CreateSettlementBody>;
 export type AuthTokenBody = z.infer<typeof AuthTokenBody>;
 export type UpdatePaymentStatusBody = z.infer<typeof UpdatePaymentStatusBody>;
 export type UpdateMerchantSettingsBody = z.infer<typeof UpdateMerchantSettingsBody>;
+
+export const PaginationQuery = z.object({
+  limit: z.coerce.number().max(200).default(50),
+  offset: z.coerce.number().min(0).default(0),
+});
+export type PaginationQuery = z.infer<typeof PaginationQuery>;

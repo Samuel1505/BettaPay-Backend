@@ -13,7 +13,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import crypto from 'crypto';
 import { rpc } from '@stellar/stellar-sdk';
-import { validateEnv, registerErrorHandler } from '@bettapay/validation';
+import { validateEnv, registerErrorHandler, PaginationQuery } from '@bettapay/validation';
 
 const env = validateEnv(process.env);
 const PORT = Number(process.env.PORT ?? '3003');
@@ -50,7 +50,9 @@ fastify.get('/api/health', async (request, reply) => {
 });
 
 fastify.get('/api/events', async (request, reply) => {
-  return { events, total: events.length, latestLedgerCursor };
+  const { limit, offset } = PaginationQuery.parse(request.query ?? {});
+  const paginatedEvents = events.slice(offset, offset + limit);
+  return { events: paginatedEvents, total: events.length, latestLedgerCursor };
 });
 
 const server = new rpc.Server(env.STELLAR_RPC_URL, { allowHttp: true });

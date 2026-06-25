@@ -33,7 +33,8 @@ import {
   CreateSettlementBody,
   registerErrorHandler,
   createErrorResponse,
-  ErrorCodes
+  ErrorCodes,
+  PaginationQuery
 } from "@bettapay/validation";
 import { Queue, Worker } from 'bullmq';
 import { PrismaClient } from '@prisma/client';
@@ -237,11 +238,15 @@ fastify.get('/api/health', async (_request, reply) => {
   });
 });
 
-fastify.get('/api/settlements', async (_request, reply) => {
+fastify.get('/api/settlements', async (request, reply) => {
+  const { limit, offset } = PaginationQuery.parse(request.query ?? {});
   const records = await prisma.settlement.findMany({
+    take: limit,
+    skip: offset,
     orderBy: { initiatedAt: 'desc' },
   });
-  return { settlements: records, total: records.length };
+  const total = await prisma.settlement.count();
+  return { settlements: records, total };
 });
 
 interface ReconcileQuery {
