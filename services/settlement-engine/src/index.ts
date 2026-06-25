@@ -23,9 +23,11 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
-import crypto from 'crypto';
-import Redis from 'ioredis';
-import { PrismaClient, Settlement } from '@prisma/client';
+import rateLimit from '@fastify/rate-limit';
+import * as crypto from 'crypto';
+import { Redis } from 'ioredis';
+import { Queue, Worker } from 'bullmq';
+import { PrismaClient } from '@prisma/client';
 import BigNumber from 'bignumber.js';
 import { computeSettlementAmounts } from './settlement-amounts.js';
 import {
@@ -36,8 +38,6 @@ import {
   ErrorCodes,
   PaginationQuery
 } from "@bettapay/validation";
-import { Queue, Worker } from 'bullmq';
-import { PrismaClient } from '@prisma/client';
 
 interface CreateSettlementRouteBody {
   merchantId?: unknown;
@@ -57,6 +57,8 @@ type SettlementJobData = {
   grossAmount: string;
   asset: string;
 };
+
+type SettlementRecord = NonNullable<Awaited<ReturnType<typeof prisma.settlement.findUnique>>>;
 
 const fastify = Fastify({
   logger: true,
@@ -78,6 +80,19 @@ fastify.register(cors, {
 });
 
 fastify.register(helmet, { contentSecurityPolicy: false });
+
+fastify.register(rateLimit, {
+  global: true,
+  max: 1000,
+  timeWindow: 60 * 1000,
+  errorResponseBuilder: (_request, context) => ({
+    error: {
+      code: 'RATE_LIMIT_EXCEEDED',
+      message: `Too many requests — rate limit is ${context.max} requests per ${context.after}`,
+    },
+  }),
+});
+
 registerErrorHandler(fastify);
 
 const redisConnection = new URL(env.REDIS_URL);
@@ -219,8 +234,6 @@ new Worker('settlements', async job => {
   removeOnFail: { count: 5000 },
 });
 
-const prisma = new PrismaClient();
-
 fastify.get('/api/health', async (_request, reply) => {
   let redisConnected = false;
   try {
@@ -333,7 +346,7 @@ fastify.get<{ Querystring: ReconcileQuery }>('/api/settlements/reconcile', async
     }
 
     // 3. Diff the two sets by settlement ID and compare records
-    const localMap = new Map<string, Settlement>();
+    const localMap = new Map<string, SettlementRecord>();
     for (const r of localRecords) {
       localMap.set(r.id, r);
     }
@@ -463,7 +476,17 @@ fastify.get<{ Querystring: ReconcileQuery }>('/api/settlements/reconcile', async
   }
 });
 
-fastify.post<{ Body: CreateSettlementRouteBody }>('/api/settlements', async (request, reply) => {
+fastify.post<{ Body: CreateSettlementRouteBody }>(
+  '/api/settlements',
+  {
+    config: {
+      rateLimit: {
+        max: 60,
+        timeWindow: 60 * 1000,
+      },
+    },
+  },
+  async (request, reply) => {
     const d = CreateSettlementBody.parse(request.body);
 
     // Validate that the amount is positive without floating-point conversion
