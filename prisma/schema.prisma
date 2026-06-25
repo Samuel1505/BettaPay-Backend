@@ -59,6 +59,7 @@ model Settlement {
   feeBps      Int
   asset       String
   status      SettlementStatus @default(pending)
+  webhookUrl  String?
   initiatedAt DateTime         @default(now())
   completedAt DateTime?
 }

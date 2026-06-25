@@ -615,6 +615,10 @@ fastify.post<{ Body: CreateSettlementRouteBody }>('/api/settlements', {
 }, async (request, reply) => {
   try {
     const d = CreateSettlementBody.parse(request.body);
+    const merchant = await prisma.merchant.findUnique({ where: { id: d.merchantId } });
+    const settings = merchant?.settings as { webhookUrl?: string } | null | undefined;
+    const webhookUrl = settings?.webhookUrl || null;
+
     const settlement = await prisma.settlement.create({
       data: {
         id: 'set_' + crypto.randomUUID().replace(/-/g, ''),
@@ -622,6 +626,7 @@ fastify.post<{ Body: CreateSettlementRouteBody }>('/api/settlements', {
         totalAmount: d.amount,
         asset: d.asset,
         status: 'pending',
+        webhookUrl,
       }
     });
     return reply.code(201).send(settlement);

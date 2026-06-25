@@ -81,17 +81,132 @@ const connectionParams = {
   port: parseInt(redisConnection.port || '6379', 10),
 };
 
+async function sendWebhookWithRetries(url: string, payload: any, maxRetries = 3, initialDelay = 1000): Promise<void> {
+  let attempt = 0;
+  while (attempt <= maxRetries) {
+    attempt++;
+    fastify.log.info({ url, attempt, payload }, 'Attempting to send webhook notification');
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5-second timeout
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      const responseBody = await response.text().catch(() => '');
+      
+      fastify.log.info({
+        url,
+        attempt,
+        status: response.status,
+        response: responseBody,
+      }, 'Webhook delivery attempt completed');
+
+      if (response.ok) {
+        return; // Success!
+      }
+
+      throw new Error(`Webhook responded with status ${response.status}`);
+    } catch (error) {
+      fastify.log.warn({
+        url,
+        attempt,
+        error: error instanceof Error ? error.message : String(error),
+      }, 'Webhook delivery attempt failed');
+
+      if (attempt > maxRetries) {
+        throw new Error(`Webhook delivery failed after ${maxRetries} retries: ${error instanceof Error ? error.message : String(error)}`);
+      }
+
+      // Exponential backoff
+      const delay = initialDelay * Math.pow(2, attempt - 1);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+
 const settlementQueue = new Queue('settlements', { connection: connectionParams });
 
 new Worker('settlements', async job => {
+  const settlementId = job.data.id;
+  
   fastify.log.info({
     jobId: job.id,
     merchantId: job.data.merchantId,
-    amount: job.data.totalAmount,
+    amount: job.data.grossAmount,
     asset: job.data.asset,
     jobName: job.name
   }, 'Processing settlement job');
-  // In a real app, this interacts with Soroban
+
+  const settlement = await prisma.settlement.findUnique({
+    where: { id: settlementId }
+  });
+
+  if (!settlement) {
+    throw new Error(`Settlement ${settlementId} not found`);
+  }
+
+  // If already in a terminal state, we just make sure the webhook is delivered
+  if (settlement.status === 'completed' || settlement.status === 'failed') {
+    fastify.log.info({ settlementId, status: settlement.status }, 'Settlement already processed, sending webhook');
+    if (settlement.webhookUrl) {
+      await sendWebhookWithRetries(settlement.webhookUrl, {
+        event: `settlement.${settlement.status}`,
+        data: settlement,
+      });
+    }
+    return;
+  }
+
+  try {
+    // In a real app, this interacts with Soroban
+    // Simulate settlement processing success
+    const updatedSettlement = await prisma.settlement.update({
+      where: { id: settlementId },
+      data: {
+        status: 'completed',
+        completedAt: new Date(),
+      },
+    });
+
+    fastify.log.info({ settlementId }, 'Settlement completed in database');
+
+    if (updatedSettlement.webhookUrl) {
+      await sendWebhookWithRetries(updatedSettlement.webhookUrl, {
+        event: 'settlement.completed',
+        data: updatedSettlement,
+      });
+    }
+  } catch (error) {
+    fastify.log.error({ error, settlementId }, 'Settlement processing failed');
+
+    const updatedSettlement = await prisma.settlement.update({
+      where: { id: settlementId },
+      data: {
+        status: 'failed',
+        completedAt: new Date(),
+      },
+    }).catch(() => null);
+
+    if (updatedSettlement && updatedSettlement.webhookUrl) {
+      await sendWebhookWithRetries(updatedSettlement.webhookUrl, {
+        event: 'settlement.failed',
+        data: updatedSettlement,
+      }).catch(err => {
+        fastify.log.error({ err, settlementId }, 'Failed to send failure webhook');
+      });
+    }
+
+    throw error;
+  }
 }, {
   connection: connectionParams,
   concurrency: 5,
@@ -100,15 +215,6 @@ new Worker('settlements', async job => {
 });
 
 const prisma = new PrismaClient();
-
-// Reads a merchant's fee rule (basis points) from Merchant.settings JSON. Falls
-// back to the configurable default when the merchant is missing or has no rule.
-async function fetchMerchantFeeBps(merchantId: string): Promise<number> {
-  const merchant = await prisma.merchant.findUnique({ where: { id: merchantId } });
-  const settings = merchant?.settings as { feeBps?: number } | null | undefined;
-  const feeBps = settings?.feeBps;
-  return typeof feeBps === 'number' && Number.isFinite(feeBps) ? feeBps : env.FEES_DEFAULT_BPS;
-}
 
 fastify.get('/api/health', async (_request, reply) => {
   let redisConnected = false;
@@ -358,7 +464,11 @@ fastify.post<{ Body: CreateSettlementRouteBody }>('/api/settlements', async (req
       return reply.code(400).send({ error: 'amount must be > 0' });
     }
 
-    const feeBps = await fetchMerchantFeeBps(d.merchantId);
+    const merchant = await prisma.merchant.findUnique({ where: { id: d.merchantId } });
+    const settings = merchant?.settings as { feeBps?: number; webhookUrl?: string } | null | undefined;
+    const feeBps = typeof settings?.feeBps === 'number' && Number.isFinite(settings.feeBps) ? settings.feeBps : env.FEES_DEFAULT_BPS;
+    const webhookUrl = settings?.webhookUrl || null;
+
     const { grossAmount, feeAmount, netAmount } = computeSettlementAmounts(d.amount, feeBps);
 
     const rawIdempotencyKey = request.headers['idempotency-key'];
@@ -387,6 +497,7 @@ fastify.post<{ Body: CreateSettlementRouteBody }>('/api/settlements', async (req
         feeBps,
         asset: d.asset,
         status: 'pending',
+        webhookUrl,
       },
     });
 
