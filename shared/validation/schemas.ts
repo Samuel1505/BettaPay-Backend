@@ -209,6 +209,23 @@ export const UpdateMerchantSettingsBody = z.object({
   tier: z.string().optional(),
 });
 
+export const PaginationQuery = z.object({
+  limit: z.coerce.number().max(200).default(50),
+  offset: z.coerce.number().min(0).default(0),
+});
+export type PaginationQuery = z.infer<typeof PaginationQuery>;
+
+export const DateRangeQuery = z
+  .object({
+    from: isoDateString.optional(),
+    to: isoDateString.optional().default(() => new Date().toISOString())
+  })
+  .refine(
+    (data) => !data.from || !data.to || data.from <= data.to,
+    { message: "from must be before to" }
+  );
+export type DateRangeQuery = z.infer<typeof DateRangeQuery>;
+
 export type CreateMerchantBody = z.infer<typeof CreateMerchantBody>;
 export type CreatePaymentBody = z.infer<typeof CreatePaymentBody>;
 export type CreateSettlementBody = z.infer<typeof CreateSettlementBody>;
