@@ -582,6 +582,32 @@ fastify.patch<{ Params: PaymentParams; Body: UpdatePaymentStatusRouteBody }>('/a
 });
 
 // Settlements
+fastify.get('/api/settlements', {
+  preValidation: [fastify.authenticate],
+  config: { rateLimit: { max: 100, timeWindow: '1 minute' } }
+}, async (request, reply) => {
+  const { merchantId, from, to } = request.query as { merchantId?: string; from?: string; to?: string };
+  const where: any = {};
+  if (merchantId) {
+    where.merchantId = merchantId;
+  }
+  if (from || to) {
+    where.initiatedAt = {};
+    if (from) {
+      where.initiatedAt.gte = new Date(from);
+    }
+    if (to) {
+      where.initiatedAt.lte = new Date(to);
+    }
+  }
+
+  const records = await prisma.settlement.findMany({
+    where,
+    orderBy: { initiatedAt: 'desc' },
+  });
+  return { settlements: records, total: records.length };
+});
+
 fastify.post<{ Body: CreateSettlementRouteBody }>('/api/settlements', {
   preValidation: [fastify.authenticate],
   preHandler: [logRequestBody],
