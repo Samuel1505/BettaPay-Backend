@@ -28,7 +28,7 @@ import fastifyJwt from '@fastify/jwt';
 import rateLimit from '@fastify/rate-limit';
 import crypto from 'crypto';
 import { z } from 'zod';
-import { validateEnv, getPrismaLogLevels, setupPrismaQueryLogging, connectWithRetry } from '@bettapay/validation';
+import { validateEnv, getPrismaLogLevels, setupPrismaQueryLogging, connectWithRetry, genReqId } from '@bettapay/validation';
 import {
   CreateMerchantBody,
   CreatePaymentBody,
@@ -141,9 +141,7 @@ const fastify = Fastify({
   // Limit request body size to 1MB (1,048,576 bytes) to protect the API gateway
   // from oversized payload attacks and align with typical financial transaction payload sizes.
   bodyLimit: 1_048_576,
-  genReqId: function (req) {
-    return (req.headers['x-request-id'] as string) || crypto.randomUUID();
-  }
+  genReqId
 });
 
 registerErrorHandler(fastify);
@@ -282,7 +280,12 @@ fastify.register(fastifyJwt, {
 fastify.register(rateLimit, {
   max: 1000,
   timeWindow: '1 minute',
-  addHeaders: true
+  addHeaders: {
+    'x-ratelimit-limit': true,
+    'x-ratelimit-remaining': true,
+    'x-ratelimit-reset': true,
+    'retry-after': true
+  }
 });
 
 fastify.register(rateLimit, {

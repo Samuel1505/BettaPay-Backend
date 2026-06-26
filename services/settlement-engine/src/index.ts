@@ -40,6 +40,7 @@ import {
   getPrismaLogLevels,
   setupPrismaQueryLogging,
   connectWithRetry,
+  genReqId,
 } from "@bettapay/validation";
 
 interface CreateSettlementRouteBody {
@@ -67,9 +68,7 @@ const fastify = Fastify({
   logger: true,
   // Explicitly set body limit to 1MB (Fastify's default)
   bodyLimit: 1_048_576,
-  genReqId: function (req) {
-    return (req.headers['x-request-id'] as string) || crypto.randomUUID();
-  }
+  genReqId
 });
 
 setupPrismaQueryLogging(prisma, fastify.log);
@@ -165,7 +164,15 @@ async function sendWebhookWithRetries(url: string, payload: any, maxRetries = 3,
   }
 }
 
-const settlementQueue = new Queue('settlements', { connection: connectionParams });
+const settlementQueue = new Queue('settlements', {
+  connection: connectionParams,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 2000 },
+    removeOnComplete: { count: 1000 },
+    removeOnFail: { count: 5000 },
+  },
+});
 const settlementDLQ = new Queue('settlements-dlq', { connection: connectionParams });
 
 const worker = new Worker('settlements', async job => {
@@ -252,10 +259,6 @@ const worker = new Worker('settlements', async job => {
 }, {
   connection: connectionParams,
   concurrency: 5,
-  attempts: 3,
-  backoff: { type: 'exponential', delay: 2000 },
-  removeOnComplete: { count: 1000 },
-  removeOnFail: { count: 5000 },
 });
 
 worker.on('failed', async (job, err) => {
@@ -548,8 +551,12 @@ fastify.post<{ Body: CreateSettlementRouteBody }>(
   async (request, reply) => {
     const d = CreateSettlementBody.parse(request.body);
 
+    if (!d.amount || !d.asset) {
+      return reply.code(400).send(createErrorResponse(ErrorCodes.VALIDATION_ERROR, 'amount and asset are required'));
+    }
+
     // Validate that the amount is positive without floating-point conversion
-    const grossBN = new BigNumber(d.amount ?? '0');
+    const grossBN = new BigNumber(d.amount);
     if (!grossBN.isFinite() || grossBN.isLessThanOrEqualTo(0)) {
       return reply.code(400).send(createErrorResponse(ErrorCodes.VALIDATION_ERROR, 'amount must be > 0'));
     }

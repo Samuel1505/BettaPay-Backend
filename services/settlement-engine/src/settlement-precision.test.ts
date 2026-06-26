@@ -48,7 +48,7 @@ test('USDC: very large amount with 6 decimals', (t) => {
   const { grossAmount, feeAmount, netAmount } = computeSettlementAmounts('9999999.999999', 100);
   t.equal(grossAmount, '9999999.999999', 'gross preserved');
   t.equal(feeAmount,   '99999.999999',   '1% of 9999999.999999');
-  t.equal(netAmount,   '9899999.999000', 'net = gross − fee, no floating-point loss');
+  t.equal(netAmount,   '9900000.000000', 'net = gross − fee, no floating-point loss');
   t.end();
 });
 

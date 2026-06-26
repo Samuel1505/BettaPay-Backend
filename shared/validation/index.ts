@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { IncomingMessage } from 'http';
 import { randomUUID } from 'crypto';
+import { FastifyRequest } from 'fastify';
 import { resolveAllowedOrigins } from './cors.js';
 
 export * from './schemas.js';
@@ -9,8 +10,9 @@ export * from './prisma.js';
 export * from './cors.js';
 import "dotenv/config";
 
-export function genReqId(req: IncomingMessage): string {
-  return (req.headers['x-request-id'] as string) || randomUUID();
+export function genReqId(req: FastifyRequest | IncomingMessage): string {
+  const reqId = req.headers['x-request-id'];
+  return (Array.isArray(reqId) ? reqId[0] : reqId) || randomUUID();
 }
 
 // ─── Standard error response envelope ─────────────────────────────────────────

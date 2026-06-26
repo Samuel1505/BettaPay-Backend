@@ -9,7 +9,7 @@
     "start": "node dist/index.js",
     "type-check": "tsc --noEmit",
     "clean": "rm -rf dist",
-    "test": "TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/settlement-precision.test.ts"
+    "test": "cross-env TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/settlement-precision.test.ts && cross-env TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/genReqId-usage.test.ts"
   },
   "dependencies": {
     "@bettapay/validation": "workspace:*",
