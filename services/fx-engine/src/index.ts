@@ -15,7 +15,13 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
-import { validateEnv, registerErrorHandler, createErrorResponse, ErrorCodes } from '@bettapay/validation';
+import {
+  validateEnv,
+  registerErrorHandler,
+  createErrorResponse,
+  ErrorCodes,
+  genReqId,
+} from '@bettapay/validation';
 
 const env = validateEnv(process.env);
 const PORT = Number(process.env.PORT ?? '3002');
@@ -37,6 +43,8 @@ const CURRENCY_DISPLAY_NAMES: Record<string, string> = {
   NGN:  'Nigerian Naira',
 };
 
+const SUPPORTED_CURRENCIES = Object.keys(FALLBACK_RATES);
+
 // ── In-memory rate cache (issues #47 & #48) ────────────────────────────────
 
 interface RateCache {
@@ -49,15 +57,35 @@ let cache: RateCache = {
   cachedAt: Date.now(),
 };
 
-fastify.get('/api/health', async (request, reply) => {
+const fastify = Fastify({
+  logger: true,
+  genReqId,
+});
+
+fastify.register(cors, {
+  origin: env.ALLOWED_ORIGINS.split(',').map((o: string) => o.trim()),
+});
+fastify.register(rateLimit, { max: 200, timeWindow: 60 * 1000 });
+registerErrorHandler(fastify);
+
+fastify.get('/api/health', async (_request, _reply) => {
   return {
     status: 'ok',
     uptime: Math.floor((Date.now() - startTime) / 1000),
   };
 });
 
-fastify.get('/api/rates', async (request, reply) => {
-  return { rates, updatedAt: new Date().toISOString() };
+fastify.get('/api/rates', async (_request, _reply) => {
+  return { rates: cache.rates, updatedAt: new Date(cache.cachedAt).toISOString() };
+});
+
+fastify.get('/api/currencies', async (_request, _reply) => {
+  return {
+    currencies: SUPPORTED_CURRENCIES.map((code) => ({
+      code,
+      name: CURRENCY_DISPLAY_NAMES[code],
+    })),
+  };
 });
 
 // ── GET /api/quote (issues #48 & #49) ────────────────────────────────────
@@ -79,10 +107,27 @@ fastify.get(
     },
   },
   async (request, reply) => {
-    const query  = QuoteQuerySchema.parse(request.query);
+    let query: z.infer<typeof QuoteQuerySchema>;
+    try {
+      query = QuoteQuerySchema.parse(request.query);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return reply.code(400).send(
+          createErrorResponse(ErrorCodes.INVALID_QUERY, 'Invalid query parameters', err.errors),
+        );
+      }
+      throw err;
+    }
+
     const from   = query.from.toUpperCase();
     const to     = query.to.toUpperCase();
     const amount = parseFloat(query.amount);
+
+    if (amount <= 0) {
+      return reply.code(400).send(
+        createErrorResponse(ErrorCodes.INVALID_AMOUNT, 'Amount must be greater than zero'),
+      );
+    }
 
     // Validate that both currencies are supported (issue #49)
     const unsupported: string[] = [];
@@ -90,16 +135,18 @@ fastify.get(
     if (!SUPPORTED_CURRENCIES.includes(to))   unsupported.push(to);
 
     if (unsupported.length > 0) {
-      return reply.code(400).send({
-        error:               'Unsupported currency',
-        unsupportedCurrencies: unsupported,
-        supportedCurrencies: SUPPORTED_CURRENCIES,
-      });
+      return reply.code(400).send(
+        createErrorResponse(
+          ErrorCodes.UNSUPPORTED_CURRENCY_PAIR,
+          `Unsupported currency: ${unsupported.join(', ')}`,
+          { unsupportedCurrencies: unsupported, supportedCurrencies: SUPPORTED_CURRENCIES },
+        ),
+      );
     }
 
     if (from === to) {
       return reply.code(400).send(
-        createErrorResponse(ErrorCodes.VALIDATION_ERROR, 'from and to must be different currencies'),
+        createErrorResponse(ErrorCodes.INVALID_QUERY, 'from and to must be different currencies'),
       );
     }
 
@@ -111,19 +158,18 @@ fastify.get(
     return {
       from,
       to,
-      amount:       amount.toString(),
-      result:       targetAmount.toFixed(4),
-      rate:         exchangeRate.toFixed(4),
+      amount:        amount.toString(),
+      result:        targetAmount.toFixed(4),
+      rate:          exchangeRate.toFixed(4),
       slippageLimit: '0.005',
-      cachedAt:     new Date(cache.cachedAt).toISOString(),
-      expiresAt:    new Date(Date.now() + 60_000).toISOString(),
+      cachedAt:      new Date(cache.cachedAt).toISOString(),
+      expiresAt:     new Date(Date.now() + 60_000).toISOString(),
     };
   },
 );
 
 // ── Start ──────────────────────────────────────────────────────────────────
 
-// Graceful shutdown
 let shuttingDown = false;
 
 async function shutdown(signal: string) {

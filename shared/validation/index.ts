@@ -1,8 +1,14 @@
 import { z } from 'zod';
+import { IncomingMessage } from 'http';
+import { randomUUID } from 'crypto';
 
 export * from './schemas.js';
 export * from './plugins.js';
 import "dotenv/config";
+
+export function genReqId(req: IncomingMessage): string {
+  return (req.headers['x-request-id'] as string) || randomUUID();
+}
 
 // ─── Standard error response envelope ─────────────────────────────────────────
 // Every API error response follows { error: { code, message, details? } } so
@@ -15,6 +21,9 @@ export const ErrorCodes = {
   INVALID_REQUEST: 'INVALID_REQUEST',
   REQUEST_TIMEOUT: 'REQUEST_TIMEOUT',
   INTERNAL_ERROR: 'INTERNAL_ERROR',
+  UNSUPPORTED_CURRENCY_PAIR: 'UNSUPPORTED_CURRENCY_PAIR',
+  INVALID_AMOUNT: 'INVALID_AMOUNT',
+  INVALID_QUERY: 'INVALID_QUERY',
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
