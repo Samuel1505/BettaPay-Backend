@@ -63,7 +63,7 @@ const fastify = Fastify({
 });
 
 fastify.register(cors, {
-  origin: env.ALLOWED_ORIGINS.split(',').map((o: string) => o.trim()),
+  origin: env.ALLOWED_ORIGINS,
 });
 fastify.register(rateLimit, { max: 200, timeWindow: 60 * 1000 });
 registerErrorHandler(fastify);

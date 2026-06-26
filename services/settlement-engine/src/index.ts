@@ -36,7 +36,10 @@ import {
   registerErrorHandler,
   createErrorResponse,
   ErrorCodes,
-  SettlementListQuery
+  SettlementListQuery,
+  getPrismaLogLevels,
+  setupPrismaQueryLogging,
+  connectWithRetry,
 } from "@bettapay/validation";
 
 interface CreateSettlementRouteBody {
@@ -49,7 +52,7 @@ const env = validateEnv(process.env);
 const PORT = Number(process.env.PORT ?? '3001');
 const startTime = Date.now();
 
-const prisma = new PrismaClient();
+const prisma = new PrismaClient({ log: getPrismaLogLevels() });
 
 type SettlementJobData = {
   id: string;
@@ -69,6 +72,8 @@ const fastify = Fastify({
   }
 });
 
+setupPrismaQueryLogging(prisma, fastify.log);
+
 const redis = new Redis(env.REDIS_URL);
 
 fastify.addHook('onClose', async () => {
@@ -76,7 +81,7 @@ fastify.addHook('onClose', async () => {
 });
 
 fastify.register(cors, { 
-  origin: env.ALLOWED_ORIGINS.split(',').map((o: string) => o.trim()) 
+  origin: env.ALLOWED_ORIGINS
 });
 
 fastify.register(helmet, { contentSecurityPolicy: false });
@@ -605,6 +610,7 @@ fastify.post<{ Body: CreateSettlementRouteBody }>(
 
 const start = async () => {
   try {
+    await connectWithRetry(prisma, fastify.log);
     await fastify.listen({ port: PORT, host: '0.0.0.0' });
   } catch (err) {
     fastify.log.error(err);

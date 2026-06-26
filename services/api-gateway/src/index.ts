@@ -17,6 +17,9 @@
  *   PATCH  /api/payments/:id/status  — transition payment status (protected)
  *   POST   /api/settlements          — trigger settlement (protected)
  *   GET    /api/deployments          — Soroban contract addresses (testnet)
+ *   GET    /api/rates                — proxy to FX engine (timeout-aware)
+ *   GET    /api/currencies           — proxy to FX engine (timeout-aware)
+ *   GET    /api/quote                — proxy to FX engine (timeout-aware)
  */
 
 import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
@@ -25,7 +28,7 @@ import fastifyJwt from '@fastify/jwt';
 import rateLimit from '@fastify/rate-limit';
 import crypto from 'crypto';
 import { z } from 'zod';
-import { validateEnv } from '@bettapay/validation';
+import { validateEnv, getPrismaLogLevels, setupPrismaQueryLogging, connectWithRetry } from '@bettapay/validation';
 import {
   CreateMerchantBody,
   CreatePaymentBody,
@@ -41,6 +44,7 @@ import { PrismaClient } from '@prisma/client';
 import pg from 'pg';
 import helmet from '@fastify/helmet';
 import { PrismaPg } from '@prisma/adapter-pg';
+import { fetchUpstream, UpstreamTimeoutError } from './upstream-fetch.js';
 
 declare module 'fastify' {
   export interface FastifyInstance {
@@ -257,13 +261,14 @@ fastify.addHook('onSend', async (request, reply, payload) => {
 
 const pool = new pg.Pool({ connectionString: env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
+const prisma = new PrismaClient({ adapter, log: getPrismaLogLevels() });
+setupPrismaQueryLogging(prisma, fastify.log);
 
 // Setup plugins
 fastify.register(helmet, { contentSecurityPolicy: false, hsts: { maxAge: 31536000 }, referrerPolicy: { policy: 'no-referrer' } });
 
 fastify.register(cors, {
-  origin: env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+  origin: env.ALLOWED_ORIGINS
 });
 
 fastify.register(fastifyJwt, {
@@ -724,6 +729,36 @@ fastify.get('/api/deployments', async (request, reply) => {
   };
 });
 
+async function proxyFxUpstream(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  path: string
+) {
+  const targetUrl = new URL(path, env.FX_ENGINE_URL).toString();
+
+  try {
+    const response = await fetchUpstream(request, targetUrl, {}, request.log);
+    const body = await response.text();
+    const contentType = response.headers.get('content-type') ?? 'application/json';
+    return reply.code(response.status).type(contentType).send(body);
+  } catch (err) {
+    if (err instanceof UpstreamTimeoutError) {
+      return reply
+        .code(504)
+        .send(createErrorResponse(ErrorCodes.GATEWAY_TIMEOUT, 'Gateway Timeout'));
+    }
+    throw err;
+  }
+}
+
+fastify.get('/api/rates', async (request, reply) => proxyFxUpstream(request, reply, '/api/rates'));
+fastify.get('/api/currencies', async (request, reply) => proxyFxUpstream(request, reply, '/api/currencies'));
+fastify.get('/api/quote', async (request, reply) => {
+  const query = new URLSearchParams(request.query as Record<string, string>).toString();
+  const path = query ? `/api/quote?${query}` : '/api/quote';
+  return proxyFxUpstream(request, reply, path);
+});
+
 // Graceful shutdown
 let shuttingDown = false;
 
@@ -748,6 +783,8 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 const start = async () => {
   try {
+    await connectWithRetry(prisma, fastify.log);
+
     // Seed admin merchant
     await prisma.merchant.upsert({
       where: { id: env.ADMIN_ADDRESS },

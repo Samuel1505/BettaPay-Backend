@@ -9,7 +9,7 @@
     "start": "node dist/index.js",
     "type-check": "tsc --noEmit",
     "clean": "rm -rf dist",
-    "test": "TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/authenticate.test.ts && TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/payment-status.test.ts && TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/request-timeout.test.ts && TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/payment-idempotency.test.ts && TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/request-body-limit.test.ts"
+    "test": "TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/authenticate.test.ts && TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/payment-status.test.ts && TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/request-timeout.test.ts && TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/payment-idempotency.test.ts && TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/request-body-limit.test.ts && TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm src/upstream-fetch.test.ts"
   },
   "dependencies": {
     "@bettapay/validation": "workspace:*",

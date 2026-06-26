@@ -21,7 +21,7 @@ const PORT = Number(process.env.PORT ?? '3003');
 const fastify = Fastify({ logger: true });
 
 fastify.register(cors, { 
-  origin: env.ALLOWED_ORIGINS.split(',').map(o => o.trim()) 
+  origin: env.ALLOWED_ORIGINS
 });
 registerErrorHandler(fastify);
 

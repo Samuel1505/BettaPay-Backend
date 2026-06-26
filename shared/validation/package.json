@@ -11,7 +11,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "test": "TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm cors.test.ts && TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm prisma.test.ts"
   },
   "dependencies": {
     "zod": "^3.22.4"
