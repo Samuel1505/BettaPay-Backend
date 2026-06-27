@@ -274,10 +274,12 @@ export type EventType = (typeof EVENT_TYPES)[number];
 
 export interface IndexedEvent {
   id: string;
+  stellarId?: string | null;
   contractId: string;
   topics: string[];
   type: EventType;
   rawValue: string;
+  decodedPayload?: unknown;
   ledger: number;
   indexedAt: string;
 }
