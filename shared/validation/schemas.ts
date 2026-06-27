@@ -258,3 +258,26 @@ export type CreateSettlementBody = z.infer<typeof CreateSettlementBody>;
 export type AuthTokenBody = z.infer<typeof AuthTokenBody>;
 export type UpdatePaymentStatusBody = z.infer<typeof UpdatePaymentStatusBody>;
 export type UpdateMerchantSettingsBody = z.infer<typeof UpdateMerchantSettingsBody>;
+
+// ─── Indexer types ────────────────────────────────────────────────────────────
+
+export const EVENT_TYPES = [
+  'PaymentInitiated',
+  'PaymentCompleted',
+  'SettlementTriggered',
+  'FXExecuted',
+  'BillPaid',
+  'AnchorSettled'
+] as const;
+
+export type EventType = (typeof EVENT_TYPES)[number];
+
+export interface IndexedEvent {
+  id: string;
+  contractId: string;
+  topics: string[];
+  type: EventType;
+  rawValue: string;
+  ledger: number;
+  indexedAt: string;
+}

@@ -13,34 +13,41 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import crypto from 'crypto';
 import { rpc } from '@stellar/stellar-sdk';
-import { validateEnv, registerErrorHandler, PaginationQuery } from '@bettapay/validation';
+import { validateEnv, registerErrorHandler, PaginationQuery, EVENT_TYPES } from '@bettapay/validation';
+import type { IndexedEvent, EventType } from '@bettapay/validation';
 
 const env = validateEnv(process.env);
 const PORT = Number(process.env.PORT ?? '3003');
 
 const fastify = Fastify({ logger: true });
 
-fastify.register(cors, { 
+fastify.register(cors, {
   origin: env.ALLOWED_ORIGINS
 });
 registerErrorHandler(fastify);
 
 // In-memory event ring buffer (50 events max)
-const events: any[] = [];
+const events: IndexedEvent[] = [];
 let latestLedgerCursor: number | undefined = undefined;
 
-function pushEvent(topic: string, contractId: string, data: Record<string, unknown>, ledger: number) {
-  const event = {
+// Backoff state for polling loop
+const BASE_BACKOFF = 1000;
+const MAX_BACKOFF = 30000;
+let currentBackoff = BASE_BACKOFF;
+
+function pushEvent(topics: string[], type: EventType, contractId: string, rawValue: string, ledger: number): IndexedEvent {
+  const event: IndexedEvent = {
     id: 'evt_' + crypto.randomUUID().replace(/-/g, ''),
     contractId,
-    topic,
-    ...data,
+    topics,
+    type,
+    rawValue,
     ledger,
     indexedAt: new Date().toISOString(),
   };
   events.unshift(event);
   if (events.length > 50) events.pop();
-  fastify.log.info(`[Indexer] ${topic} — ${event.id} (Ledger ${ledger})`);
+  fastify.log.info(`[Indexer] ${topics.join(',')} — ${event.id} (Ledger ${ledger})`);
   return event;
 }
 
@@ -51,8 +58,21 @@ fastify.get('/api/health', async (request, reply) => {
 
 fastify.get('/api/events', async (request, reply) => {
   const { limit, offset } = PaginationQuery.parse(request.query ?? {});
-  const paginatedEvents = events.slice(offset, offset + limit);
-  return { events: paginatedEvents, total: events.length, latestLedgerCursor };
+  const typeParam = (request.query as Record<string, unknown>)?.type as string | undefined;
+
+  let filteredEvents = events;
+
+  if (typeParam) {
+    const requestedTypes = typeParam.split(',').map((t: string) => t.trim()) as EventType[];
+    const validTypes = requestedTypes.filter((t): t is EventType => (EVENT_TYPES as readonly string[]).includes(t));
+
+    if (validTypes.length > 0) {
+      filteredEvents = events.filter((event) => validTypes.includes(event.type));
+    }
+  }
+
+  const paginatedEvents = filteredEvents.slice(offset, offset + limit);
+  return { events: paginatedEvents, total: filteredEvents.length, latestLedgerCursor };
 });
 
 const server = new rpc.Server(env.STELLAR_RPC_URL, { allowHttp: true });
@@ -80,25 +100,29 @@ async function pollEvents() {
 
     if (response.events && response.events.length > 0) {
       for (const evt of response.events) {
-        // Simple mapping of topics for this demo.
-        // In production, decode XDR values properly.
+        const topics = Array.isArray(evt.topic) ? evt.topic.map(String) : [String(evt.topic)];
         pushEvent(
-          evt.topic.join(','),
+          topics,
+          topics[0] as EventType,
           evt.contractId ? evt.contractId.toString() : 'unknown',
-          { rawValue: evt.value.toXDR('base64') },
+          evt.value.toXDR('base64'),
           evt.ledger
         );
         latestLedgerCursor = Math.max(latestLedgerCursor, evt.ledger + 1);
       }
     } else {
-      // If no events, just advance cursor by querying latest ledger
       const latest = await server.getLatestLedger();
       latestLedgerCursor = Math.max(latestLedgerCursor, latest.sequence);
     }
+
+    currentBackoff = BASE_BACKOFF;
+    setTimeout(pollEvents, currentBackoff);
   } catch (err) {
     fastify.log.error(`[Indexer] Polling error: ${err}`);
-  } finally {
-    setTimeout(pollEvents, 5000);
+    const jitter = currentBackoff * (0.75 + Math.random() * 0.5);
+    fastify.log.info(`[Indexer] Retrying in ${Math.round(jitter)}ms (backoff: ${currentBackoff}ms)`);
+    currentBackoff = Math.min(currentBackoff * 2, MAX_BACKOFF);
+    setTimeout(pollEvents, jitter);
   }
 }
 
